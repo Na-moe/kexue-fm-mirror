@@ -1,9 +1,9 @@
-name: Scrape and Translate Kexue FM Blog
+name: Scrape and Translate Kexue FM Blog using Claude Code
 
 on:
-  # 每天 UTC 10:00 运行一次（北京时间 18:00）
+  # 每8小时运行一次
   schedule:
-    - cron: '0 2/8 * * *'
+    - cron: '0 */8 * * *'
 
   # 手动触发
   workflow_dispatch:
@@ -16,6 +16,8 @@ on:
 permissions:
   contents: write
   actions: write
+  pages: write
+  deployments: write
 
 jobs:
   scrape-and-translate:
@@ -30,90 +32,151 @@ jobs:
         # 使用带 token 的 URL
         token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
+    - name: Create tmp directory
+      run: |
+        mkdir -p tmp
+
+    - name: Get latest blog IDs
+      id: get-ids
+      uses: anthropics/claude-code-action@v1
       with:
-        python-version: '3.11'
+        anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+        prompt: |
+          请使用 web-reader MCP 工具访问 https://kexue.fm/
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install requests beautifulsoup4 html2text markdown
+          任务：
+          1. 读取网站内容，找到最新20篇博客文章
+          2. 提取每篇文章的ID（通常在URL中，如 /archives/12345）
+          3. 将ID列表保存到 tmp/latest_ids.md 文件中
+          4. 每行只写一个ID，从最新到最旧排序
 
-    - name: Install claude-code-actions
-      run: |
-        npm install -g @anthropic-ai/claude-code-actions
-      continue-on-error: true
+          注意：
+          - 确保获取的是真实的文章ID，不是其他数字
+          - 如果无法从主页获取，尝试访问文章列表页
+          - 保存格式示例：
+            11459
+            11428
+            11416
+            ...
 
-    - name: Configure Git
+    - name: Check for missing articles
+      id: check-missing
+      uses: anthropics/claude-code-action@v1
+      with:
+        anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+        prompt: |
+          请执行以下任务：
+
+          1. 读取 tmp/latest_ids.md 中的ID列表
+          2. 检查 kexue_fm_zh_cn/ 目录下哪些ID对应的 .md 文件不存在
+          3. 将缺失的ID列表保存到 tmp/missing_ids.md
+          4. 如果没有缺失的文章，创建一个空的 tmp/missing_ids.md 文件
+
+          注意：
+          - 只检查文件名，不需要读取内容
+          - 每行一个ID
+          - 保持原顺序
+
+    - name: Scrape new articles
+      if: steps.check-missing.outputs.changed == 'true'
+      uses: anthropics/claude-code-action@v1
+      with:
+        anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+        prompt: |
+          请执行以下任务：
+
+          1. 读取 tmp/missing_ids.md 中的ID列表
+          2. 对每个ID，使用 web-reader MCP 工具访问 https://kexue.fm/archives/{id}
+          3. 提取文章的完整内容，包括标题和正文
+          4. 将每篇文章保存为 kexue_fm_zh_cn/{id}.md
+
+          保存格式：
+          ```markdown
+          # {文章标题}
+
+          **原文链接**: https://kexue.fm/archives/{id}
+          **爬取时间**: {当前时间}
+
+          ---
+
+          {文章正文内容}
+          ```
+
+          注意：
+          - 保持markdown格式
+          - 确保内容完整
+          - 如果某个文章无法访问，记录下来但继续处理其他文章
+
+    - name: Translate articles to English
+      if: steps.check-missing.outputs.changed == 'true'
+      uses: anthropics/claude-code-action@v1
+      with:
+        anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+        prompt: |
+          请执行翻译任务：
+
+          1. 读取 tmp/missing_ids.md 中的ID列表
+          2. 对每个ID：
+             - 读取 kexue_fm_zh_cn/{id}.md
+             - 将中文内容翻译成英文
+             - 保持markdown格式和结构
+             - 保存到 kexue_fm_en_us/{id}.md
+
+          翻译要求：
+          - 准确翻译技术术语
+          - 保持原文的专业性
+          - 不要翻译代码块
+          - 保留所有链接和引用
+          - 在文件开头添加翻译信息
+
+          英文文件格式：
+          ```markdown
+          # (Translated from Chinese)
+
+          **Original ID**: {id}
+          **Original URL**: https://kexue.fm/archives/{id}
+          **Translation Date**: {当前时间}
+
+          ---
+
+          {翻译后的英文内容}
+          ```
+
+    - name: Check if there are changes to commit
+      id: check-changes
       run: |
+        if [ -n "$(git status --porcelain)" ]; then
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "Found changes to commit"
+        else
+          echo "has_changes=false" >> $GITHUB_OUTPUT
+          echo "No changes to commit"
+        fi
+
+    - name: Commit and push changes
+      if: steps.check-changes.outputs.has_changes == 'true'
+      run: |
+        # 配置 Git
         git config --global user.name "GitHub Actions"
         git config --global user.email "actions@github.com"
 
-    - name: Scrape new blog posts
-      run: |
-        python scrape_kexue.py
-      env:
-        # 设置环境变量
-        PYTHONUNBUFFERED: 1
-
-    - name: Check for new posts
-      id: check-posts
-      run: |
-        if [ -n "$(git status --porcelain kexue_fm_zh_cn/)" ]; then
-          echo "new_posts=true" >> $GITHUB_OUTPUT
-          echo "Found new Chinese posts to translate"
-        else
-          echo "new_posts=false" >> $GITHUB_OUTPUT
-          echo "No new posts found"
-        fi
-
-    - name: Translate posts to English
-      if: steps.check-posts.outputs.new_posts == 'true'
-      run: |
-        # 尝试使用 claude-code-actions 进行翻译
-        python translate_posts.py
-      env:
-        # 如果需要 API key，在这里配置
-        ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-        ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
-        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1
-      continue-on-error: true
-
-    - name: Alternative translation using GitHub API
-      if: steps.check-posts.outputs.new_posts == 'true'
-      run: |
-        # 如果 claude-code-actions 不可用，使用 GitHub API 进行翻译
-        python translate_with_github_api.py
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      continue-on-error: true
-
-    - name: Commit and push changes
-      if: steps.check-posts.outputs.new_posts == 'true'
-      run: |
         # 添加所有更改
         git add --all
 
-        # 检查是否有更改需要提交
-        if git diff --cached --quiet; then
-          echo "No changes to commit"
-        else
-          # 获取当前日期
-          DATE=$(date +'%Y-%m-%d %H:%M:%S')
+        # 获取当前日期
+        DATE=$(date +'%Y-%m-%d %H:%M:%S')
 
-          # 提交更改
-          git commit -m "Update blog posts - $DATE
+        # 提交更改
+        git commit -m "Update blog posts - $DATE
 
-          🤖 Generated with [Claude Code](https://claude.com/claude-code)
+        🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
-          Co-Authored-By: GitHub Actions <actions@github.com>"
+        Co-Authored-By: GitHub Actions <actions@github.com>"
 
-          # 推送更改
-          # 使用带 token 的 URL 避免 403 错误
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-          git push origin master
-        fi
+        # 推送更改
+        # 使用带 token 的 URL 避免 403 错误
+        git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+        git push origin master
 
     - name: Create summary
       run: |
@@ -145,6 +208,19 @@ jobs:
             filename=$(basename "$file")
             echo "- $filename" >> $GITHUB_STEP_SUMMARY
           done
+        fi
+
+        # 显示处理信息
+        if [ -f "tmp/latest_ids.md" ]; then
+          LATEST_COUNT=$(cat tmp/latest_ids.md 2>/dev/null | wc -l)
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 处理信息" >> $GITHUB_STEP_SUMMARY
+          echo "- 检测到的最新文章数: $LATEST_COUNT" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f "tmp/missing_ids.md" ]; then
+            MISSING_COUNT=$(cat tmp/missing_ids.md 2>/dev/null | wc -l)
+            echo "- 新增文章数: $MISSING_COUNT" >> $GITHUB_STEP_SUMMARY
+          fi
         fi
 
     - name: Notification on failure

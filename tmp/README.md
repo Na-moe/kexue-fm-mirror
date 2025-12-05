@@ -1,0 +1,1 @@
+# Temporary files\n\nThis directory contains temporary files used during the scraping and translation process.\n\n- latest_ids.md: Latest blog IDs from kexue.fm\n- missing_ids.md: IDs of articles that need to be scraped/translated
