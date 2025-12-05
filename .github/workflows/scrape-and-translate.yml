@@ -1,16 +1,12 @@
 name: Scrape and Translate Kexue FM Blog using Claude Code
 
 on:
-  # 每8小时运行一次
+  # 每天北京时间 16:00 运行一次 (UTC 8:00)
   schedule:
     - cron: '0 8 * * *'
 
   # 手动触发
   workflow_dispatch:
-
-  # push 到主分支时触发
-  push:
-    branches: [ main, master ]
 
 # 允许写入权限
 permissions:
@@ -39,9 +35,6 @@ jobs:
     - name: Get latest blog IDs
       id: get-ids
       uses: anthropics/claude-code-action@v1
-      env:
-        ANTHROPIC_BASE_URL: https://open.bigmodel.cn/api/anthropic
-        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1
       with:
         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
         prompt: |
