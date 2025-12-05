@@ -1,0 +1,143 @@
+name: Scrape and Translate Kexue FM Blog
+
+on:
+  # 每天 UTC 10:00 运行一次（北京时间 18:00）
+  schedule:
+    - cron: '0 10 * * *'
+
+  # 手动触发
+  workflow_dispatch:
+
+  # push 到主分支时触发
+  push:
+    branches: [ main, master ]
+
+jobs:
+  scrape-and-translate:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        # 保持历史记录
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests beautifulsoup4 html2text markdown
+
+    - name: Install claude-code-actions
+      run: |
+        npm install -g @anthropic-ai/claude-code-actions
+      continue-on-error: true
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "actions@github.com"
+
+    - name: Scrape new blog posts
+      run: |
+        python scrape_kexue.py
+      env:
+        # 设置环境变量
+        PYTHONUNBUFFERED: 1
+
+    - name: Check for new posts
+      id: check-posts
+      run: |
+        if [ -n "$(git status --porcelain kexue_fm_zh_cn/)" ]; then
+          echo "new_posts=true" >> $GITHUB_OUTPUT
+          echo "Found new Chinese posts to translate"
+        else
+          echo "new_posts=false" >> $GITHUB_OUTPUT
+          echo "No new posts found"
+        fi
+
+    - name: Translate posts to English
+      if: steps.check-posts.outputs.new_posts == 'true'
+      run: |
+        # 尝试使用 claude-code-actions 进行翻译
+        python translate_posts.py
+      env:
+        # 如果需要 API key，在这里配置
+        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      continue-on-error: true
+
+    - name: Alternative translation using GitHub API
+      if: steps.check-posts.outputs.new_posts == 'true'
+      run: |
+        # 如果 claude-code-actions 不可用，使用 GitHub API 进行翻译
+        python translate_with_github_api.py
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      continue-on-error: true
+
+    - name: Commit and push changes
+      if: steps.check-posts.outputs.new_posts == 'true'
+      run: |
+        # 添加所有更改
+        git add --all
+
+        # 检查是否有更改需要提交
+        if git diff --cached --quiet; then
+          echo "No changes to commit"
+        else
+          # 获取当前日期
+          DATE=$(date +'%Y-%m-%d %H:%M:%S')
+
+          # 提交更改
+          git commit -m "Update blog posts - $DATE
+
+          🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+          Co-Authored-By: GitHub Actions <actions@github.com>"
+
+          # 推送更改
+          git push
+        fi
+
+    - name: Create summary
+      run: |
+        echo "## Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        # 统计中文文章数量
+        CN_COUNT=$(find kexue_fm_zh_cn -name "*.md" 2>/dev/null | wc -l)
+        echo "- 中文文章数量: $CN_COUNT" >> $GITHUB_STEP_SUMMARY
+
+        # 统计英文文章数量
+        EN_COUNT=$(find kexue_fm_en_us -name "*.md" 2>/dev/null | wc -l)
+        echo "- 英文文章数量: $EN_COUNT" >> $GITHUB_STEP_SUMMARY
+
+        # 显示最新文章
+        if [ $CN_COUNT -gt 0 ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 最新的中文文章" >> $GITHUB_STEP_SUMMARY
+          ls -lt kexue_fm_zh_cn/*.md 2>/dev/null | head -5 | while read file; do
+            filename=$(basename "$file")
+            echo "- $filename" >> $GITHUB_STEP_SUMMARY
+          done
+        fi
+
+        if [ $EN_COUNT -gt 0 ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 最新的英文文章" >> $GITHUB_STEP_SUMMARY
+          ls -lt kexue_fm_en_us/*.md 2>/dev/null | head -5 | while read file; do
+            filename=$(basename "$file")
+            echo "- $filename" >> $GITHUB_STEP_SUMMARY
+          done
+        fi
+
+    - name: Notification on failure
+      if: failure()
+      run: |
+        echo "Workflow failed! Please check the logs for details."
+        echo "Failed at step: ${{ job.status }}"
