@@ -173,9 +173,20 @@ class KexueScraper:
         # 创建输出目录
         os.makedirs(self.posts_dir, exist_ok=True)
 
+        # 检查是否是首次运行
+        is_first_run = not os.path.exists(self.metadata_file) or len(self.load_scraped_posts()) == 0
+        max_posts = 5 if is_first_run else 20  # 首次运行只爬取5篇文章
+
+        if is_first_run:
+            logger.info(f"首次运行检测到，将只爬取最新的 {max_posts} 篇文章进行测试")
+
         # 获取文章列表
         posts = self.get_post_list()
         logger.info(f"找到 {len(posts)} 篇文章")
+
+        # 限制爬取数量
+        posts = posts[:max_posts]
+        logger.info(f"将爬取最新的 {len(posts)} 篇文章")
 
         new_posts_count = 0
 
